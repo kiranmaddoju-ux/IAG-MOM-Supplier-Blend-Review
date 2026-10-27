@@ -156,7 +156,7 @@ if uploaded_file is not None:
     df['Cleaned Supplier Group'] = df.apply(clean_group, axis=1)
 
     # ----------------------------------------------------
-    # 4. Sidebar View & Comparison Filters
+    # 4. Sidebar View & Period Controls
     # ----------------------------------------------------
     st.sidebar.markdown("---")
     st.sidebar.markdown("### ⚙️ 2. View & Period Controls")
@@ -169,7 +169,6 @@ if uploaded_file is not None:
     period_col = 'Week' if "Week" in blend_view else 'Month'
     period_label = "Week" if "Week" in blend_view else "Month"
 
-    # Sorted list of unique periods chronologically
     sorted_df = df.dropna(subset=[date_col]).sort_values(by=date_col)
     available_periods = [p for p in sorted_df[period_col].unique() if p != "Unknown"]
 
@@ -177,7 +176,6 @@ if uploaded_file is not None:
     countries_list = ['All Markets'] + sorted([c for c in df['Survey Country'].dropna().unique() if str(c).strip() != ''])
     selected_country = st.sidebar.selectbox("🌐 Country / Market:", countries_list)
 
-    # Filter by Country
     active_df = df if selected_country == 'All Markets' else df[df['Survey Country'] == selected_country].copy()
 
     # Dynamic Filter / Comparison Mode
@@ -188,7 +186,6 @@ if uploaded_file is not None:
     )
 
     if filter_mode == f"⚡ Compare with Previous {period_label}":
-        # Target period selector (defaults to latest)
         selected_target_period = st.sidebar.selectbox(
             f"Select Target {period_label}:",
             options=list(reversed(available_periods)),
@@ -217,7 +214,6 @@ if uploaded_file is not None:
         st.warning(f"Please select at least one {period_label} to display.")
         st.stop()
 
-    # Filter dataset to selected periods
     filtered_period_df = active_df[active_df[period_col].isin(selected_periods)].copy()
 
     # ----------------------------------------------------
@@ -229,7 +225,7 @@ if uploaded_file is not None:
     
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.metric("Total Completes (Selected View)", f"{total_completes_period:,}")
+        st.metric("Total Completes (View)", f"{total_completes_period:,}")
     with c2:
         st.metric("Market Filter", selected_country)
     with c3:
@@ -247,11 +243,11 @@ if uploaded_file is not None:
     other_groups = [g for g in active_df['Cleaned Supplier Group'].unique() if g not in all_groups]
     groups_order = actual_groups_found + other_groups
 
+    comp_deltas = {}
     if len(selected_periods) == 2:
         p_prev, p_curr = selected_periods[0], selected_periods[1]
         st.subheader(f"🔄 Direct Comparison: {p_curr} vs Previous ({p_prev})")
         
-        # Calculate comparison stats
         curr_subset = filtered_period_df[filtered_period_df[period_col] == p_curr]
         prev_subset = filtered_period_df[filtered_period_df[period_col] == p_prev]
 
@@ -266,8 +262,8 @@ if uploaded_file is not None:
             curr_pct = (curr_n / curr_tot * 100) if curr_tot > 0 else 0.0
             prev_pct = (prev_n / prev_tot * 100) if prev_tot > 0 else 0.0
             delta_pct = curr_pct - prev_pct
+            comp_deltas[g] = delta_pct
 
-            # Delta styling indicator
             shift_symbol = "🔺" if delta_pct > 0 else ("🔻" if delta_pct < 0 else "➖")
 
             comp_rows.append({
@@ -289,7 +285,6 @@ if uploaded_file is not None:
     st.caption("Rows represent periods in chronological sequence; columns represent Supplier Group shares.")
 
     if not filtered_period_df.empty:
-        # Cross-tab calculation
         ct = pd.crosstab(filtered_period_df[period_col], filtered_period_df['Cleaned Supplier Group'])
         ct = ct.reindex(index=selected_periods, columns=groups_order, fill_value=0)
 
@@ -302,7 +297,6 @@ if uploaded_file is not None:
 
         flipped_df['Total Completes (N)'] = row_totals
 
-        # Add Overall Total Row
         grand_total_row = {}
         grand_sum = ct.sum()
         grand_n_all = grand_sum.sum()
@@ -313,12 +307,12 @@ if uploaded_file is not None:
         grand_total_row['Total Completes (N)'] = grand_n_all
 
         flipped_df.loc['Total (Selected)'] = pd.Series(grand_total_row)
-
         st.dataframe(flipped_df, use_container_width=True)
 
         # ----------------------------------------------------
         # 8. Alignment vs Target Quota (Internal Change)
         # ----------------------------------------------------
+        alignment_summary = {}
         if selected_country != 'All Markets' and not target_df.empty:
             st.markdown("### 🎯 Alignment vs Master Blend Targets")
             country_targets = target_df[target_df['Country'].str.lower() == selected_country.lower()]
@@ -338,6 +332,13 @@ if uploaded_file is not None:
                     delta = actual_pct - target_pct
 
                     status = "🟢 Aligned" if abs(delta) <= 3.0 else ("🟡 Over Quota" if delta > 3.0 else "🔴 Under Quota")
+                    alignment_summary[grp] = {
+                        "target": target_pct,
+                        "actual": actual_pct,
+                        "delta": delta,
+                        "status": status,
+                        "count": actual_n
+                    }
 
                     align_rows.append({
                         "Supplier Group": grp,
@@ -366,6 +367,65 @@ if uploaded_file is not None:
             supp_ct['Total Completes'] = supp_ct.sum(axis=1)
             supp_ct = supp_ct.sort_values(by='Total Completes', ascending=False)
             st.dataframe(supp_ct, use_container_width=True)
+
+        # ----------------------------------------------------
+        # 10. Automated Country Summary Notes Box
+        # ----------------------------------------------------
+        st.markdown("---")
+        st.subheader(f"📝 Executive Operational Notes: {selected_country}")
+
+        with st.container(border=True):
+            if selected_country == 'All Markets':
+                st.markdown(f"""
+                * **Overall Scope**: Showing **{total_completes_period:,}** total complete completes across all active markets in the selected time scope.
+                * **Aggregation**: Currently reviewing data aggregated by **{blend_view}**.
+                * **Operational Guideline**: Select an individual country from the sidebar to review specific quota rules, supplier group balances, and action recommendations.
+                """)
+            else:
+                top_suppliers = (
+                    filtered_period_df['Supplier Name']
+                    .value_counts()
+                    .head(3)
+                    .to_dict()
+                )
+                top_supp_str = ", ".join([f"**{k}** ({v:,} completes)" for k, v in top_suppliers.items()])
+
+                # Bullet 1: Top Contributors
+                st.markdown(f"**1. Leading Panel Contributors in {selected_country}:**\n* Top sources: {top_supp_str}")
+
+                # Bullet 2: Target Quota Alignment Notes
+                if alignment_summary:
+                    notes_list = []
+                    actions = []
+                    for grp, info in alignment_summary.items():
+                        delta_sign = f"+{info['delta']:.1f}%" if info['delta'] > 0 else f"{info['delta']:.1f}%"
+                        notes_list.append(f"**{grp}**: Actual is **{info['actual']:.1f}%** vs Target **{info['target']:.0f}%** ({info['status']}, {delta_sign})")
+                        
+                        if info['delta'] > 3.0:
+                            actions.append(f"Throttle/cap **{grp}** intake (running {delta_sign} above target).")
+                        elif info['delta'] < -3.0:
+                            actions.append(f"Boost/prioritize sample for **{grp}** (lagging by {delta_sign}).")
+
+                    st.markdown("**2. Quota Health & Target Deviations:**")
+                    for n in notes_list:
+                        st.markdown(f"* {n}")
+
+                    # Bullet 3: WoW / MoM Shift Dynamics
+                    if comp_deltas:
+                        st.markdown(f"**3. {period_label}-on-{period_label} Movement Dynamic:**")
+                        for grp, d in comp_deltas.items():
+                            direction = "increased" if d > 0 else ("decreased" if d < 0 else "remained flat")
+                            st.markdown(f"* **{grp}** {direction} by **{abs(d):.1f}%** compared to {selected_periods[0]}.")
+
+                    # Bullet 4: Action Items
+                    st.markdown("**4. Recommended Operational Actions:**")
+                    if actions:
+                        for act in actions:
+                            st.markdown(f"* ⚠️ {act}")
+                    else:
+                        st.markdown("* ✅ All supplier groups are within the acceptable ±3.0% tolerance band. Maintain current allocation pacing.")
+                else:
+                    st.info(f"Master blend targets are not configured for {selected_country} in the internal rules workbook.")
 
     else:
         st.warning("No records found for the selected filter.")
