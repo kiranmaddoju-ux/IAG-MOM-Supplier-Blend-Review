@@ -66,15 +66,15 @@ def load_master_targets():
 target_df, supplier_mapping = load_master_targets()
 
 # ----------------------------------------------------
-# 3. Sidebar Ingestion & Navigation
+# 3. Sidebar Ingestion & Data Preparation
 # ----------------------------------------------------
-st.sidebar.markdown("### 📥 Upload Data")
+st.sidebar.markdown("### 📥 1. Upload Data")
 uploaded_file = st.sidebar.file_uploader("Upload Tracker Raw CSV", type=["csv"])
 
 if uploaded_file is not None:
     df = pd.read_csv(uploaded_file, low_memory=False)
 
-    # 1. Strictly filter for 'Complete' status only
+    # Strictly filter for Completes only
     status_col = 'Respondent Status Description'
     if status_col in df.columns:
         df = df[df[status_col].astype(str).str.strip().str.lower() == 'complete'].copy()
@@ -86,7 +86,7 @@ if uploaded_file is not None:
         st.warning("No records found with status 'Complete'.")
         st.stop()
 
-    # 2. Parse timestamps with dayfirst=True (June = 06)
+    # Parse timestamps with dayfirst=True
     date_cols = [c for c in ['PS Entry DateTime', 'PS Entry DateTime (Pacific Time Zone)'] if c in df.columns]
     if not date_cols:
         st.error("Missing date column: Could not find 'PS Entry DateTime'.")
@@ -95,17 +95,16 @@ if uploaded_file is not None:
     date_col = date_cols[0]
     df[date_col] = pd.to_datetime(df[date_col], dayfirst=True, errors='coerce')
 
-    # Filter from June 1st, 2026 onwards
+    # Filter from June 1st onwards
     df = df[df[date_col] >= pd.to_datetime("2026-06-01")].copy()
 
     if df.empty:
         st.warning("No complete records found from June 2026 onwards.")
         st.stop()
 
-    # 3. Derive Monthly & Weekly bucketing
+    # Generate Month & ISO Week Labels
     df['Month'] = df[date_col].dt.strftime('%B %Y')
-    df['Month_Sort'] = df[date_col].dt.strftime('%Y-%m')
-
+    
     def assign_dynamic_week(dt):
         if pd.isnull(dt):
             return "Unknown"
@@ -116,7 +115,7 @@ if uploaded_file is not None:
 
     df['Week'] = df[date_col].apply(assign_dynamic_week)
 
-    # 4. Supplier Group Assignment
+    # Supplier Group Mapping
     def clean_group(row):
         country = str(row.get('Survey Country', '')).strip()
         supplier = str(row.get('Supplier Name', '')).strip()
@@ -157,10 +156,10 @@ if uploaded_file is not None:
     df['Cleaned Supplier Group'] = df.apply(clean_group, axis=1)
 
     # ----------------------------------------------------
-    # 4. Sidebar Controls
+    # 4. Sidebar View & Comparison Filters
     # ----------------------------------------------------
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### ⚙️ View Controls")
+    st.sidebar.markdown("### ⚙️ 2. View & Period Controls")
 
     blend_view = st.sidebar.radio(
         "📅 Blend Frequency:",
@@ -168,10 +167,11 @@ if uploaded_file is not None:
         index=0
     )
     period_col = 'Week' if "Week" in blend_view else 'Month'
+    period_label = "Week" if "Week" in blend_view else "Month"
 
-    # Chronologically sorted periods
+    # Sorted list of unique periods chronologically
     sorted_df = df.dropna(subset=[date_col]).sort_values(by=date_col)
-    periods_order = [p for p in sorted_df[period_col].unique() if p != "Unknown"]
+    available_periods = [p for p in sorted_df[period_col].unique() if p != "Unknown"]
 
     # Market Selection
     countries_list = ['All Markets'] + sorted([c for c in df['Survey Country'].dropna().unique() if str(c).strip() != ''])
@@ -180,47 +180,121 @@ if uploaded_file is not None:
     # Filter by Country
     active_df = df if selected_country == 'All Markets' else df[df['Survey Country'] == selected_country].copy()
 
+    # Dynamic Filter / Comparison Mode
+    filter_mode = st.sidebar.radio(
+        f"🔍 {period_label} Display Mode:",
+        options=[f"⚡ Compare with Previous {period_label}", "🎯 Custom Selection", "📜 View All Periods"],
+        index=0
+    )
+
+    if filter_mode == f"⚡ Compare with Previous {period_label}":
+        # Target period selector (defaults to latest)
+        selected_target_period = st.sidebar.selectbox(
+            f"Select Target {period_label}:",
+            options=list(reversed(available_periods)),
+            index=0
+        )
+        target_idx = available_periods.index(selected_target_period)
+        if target_idx > 0:
+            prev_period = available_periods[target_idx - 1]
+            selected_periods = [prev_period, selected_target_period]
+            st.sidebar.caption(f"Comparing: **{prev_period}** ➔ **{selected_target_period}**")
+        else:
+            selected_periods = [selected_target_period]
+            st.sidebar.caption("First period in dataset (no prior period to compare).")
+
+    elif filter_mode == "🎯 Custom Selection":
+        default_selection = available_periods[-2:] if len(available_periods) >= 2 else available_periods
+        selected_periods = st.sidebar.multiselect(
+            f"Select Specific {period_label}(s):",
+            options=available_periods,
+            default=default_selection
+        )
+    else:
+        selected_periods = available_periods
+
+    if not selected_periods:
+        st.warning(f"Please select at least one {period_label} to display.")
+        st.stop()
+
+    # Filter dataset to selected periods
+    filtered_period_df = active_df[active_df[period_col].isin(selected_periods)].copy()
+
     # ----------------------------------------------------
     # 5. Top KPI Summary Cards
     # ----------------------------------------------------
-    total_completes = len(active_df)
-    active_periods_count = len(periods_order)
-    latest_period = periods_order[-1] if periods_order else "N/A"
-    latest_completes = len(active_df[active_df[period_col] == latest_period]) if periods_order else 0
-
+    total_completes_period = len(filtered_period_df)
+    primary_period = selected_periods[-1]
+    primary_count = len(filtered_period_df[filtered_period_df[period_col] == primary_period])
+    
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.metric("Total Completes", f"{total_completes:,}")
+        st.metric("Total Completes (Selected View)", f"{total_completes_period:,}")
     with c2:
         st.metric("Market Filter", selected_country)
     with c3:
-        st.metric(f"Latest Period ({latest_period})", f"{latest_completes:,} Completes")
+        st.metric(f"Current {period_label} ({primary_period})", f"{primary_count:,} Completes")
     with c4:
-        st.metric("Total Tracking Periods", f"{active_periods_count} Periods")
+        st.metric("Periods in View", f"{len(selected_periods)} {period_label}(s)")
 
     st.markdown("---")
 
     # ----------------------------------------------------
-    # 6. Flipped Crosstab Table (Periods = Rows, Groups = Columns)
+    # 6. Period Comparison Summary (When 2 Periods Selected)
     # ----------------------------------------------------
-    st.subheader(f"📊 {selected_country} — {blend_view} Completes Blend")
-    st.caption("Rows represent chronological periods; columns represent Supplier Groups.")
+    all_groups = ['Group 1', 'Group 2', 'Group MP']
+    actual_groups_found = [g for g in all_groups if g in active_df['Cleaned Supplier Group'].unique()]
+    other_groups = [g for g in active_df['Cleaned Supplier Group'].unique() if g not in all_groups]
+    groups_order = actual_groups_found + other_groups
 
-    if not active_df.empty:
-        # Standard group order
-        all_groups = ['Group 1', 'Group 2', 'Group MP']
-        actual_groups_found = [g for g in all_groups if g in active_df['Cleaned Supplier Group'].unique()]
-        other_groups = [g for g in active_df['Cleaned Supplier Group'].unique() if g not in all_groups]
-        groups_order = actual_groups_found + other_groups
+    if len(selected_periods) == 2:
+        p_prev, p_curr = selected_periods[0], selected_periods[1]
+        st.subheader(f"🔄 Direct Comparison: {p_curr} vs Previous ({p_prev})")
+        
+        # Calculate comparison stats
+        curr_subset = filtered_period_df[filtered_period_df[period_col] == p_curr]
+        prev_subset = filtered_period_df[filtered_period_df[period_col] == p_prev]
 
-        # Crosstab with periods as index and groups as columns
-        ct = pd.crosstab(active_df[period_col], active_df['Cleaned Supplier Group'])
-        ct = ct.reindex(index=periods_order, columns=groups_order, fill_value=0)
+        curr_tot = len(curr_subset)
+        prev_tot = len(prev_subset)
 
-        # Row totals (completes per period)
+        comp_rows = []
+        for g in groups_order:
+            curr_n = len(curr_subset[curr_subset['Cleaned Supplier Group'] == g])
+            prev_n = len(prev_subset[prev_subset['Cleaned Supplier Group'] == g])
+
+            curr_pct = (curr_n / curr_tot * 100) if curr_tot > 0 else 0.0
+            prev_pct = (prev_n / prev_tot * 100) if prev_tot > 0 else 0.0
+            delta_pct = curr_pct - prev_pct
+
+            # Delta styling indicator
+            shift_symbol = "🔺" if delta_pct > 0 else ("🔻" if delta_pct < 0 else "➖")
+
+            comp_rows.append({
+                "Supplier Group": g,
+                f"Previous ({p_prev}) %": f"{prev_pct:.1f}%",
+                f"Previous ({p_prev}) (N)": prev_n,
+                f"Current ({p_curr}) %": f"{curr_pct:.1f}%",
+                f"Current ({p_curr}) (N)": curr_n,
+                f"{period_label}-over-{period_label} Shift": f"{shift_symbol} {delta_pct:+.1f}%"
+            })
+
+        st.dataframe(pd.DataFrame(comp_rows), use_container_width=True, hide_index=True)
+        st.markdown("---")
+
+    # ----------------------------------------------------
+    # 7. Flipped Table View (Periods = Rows, Groups = Columns)
+    # ----------------------------------------------------
+    st.subheader(f"📋 {selected_country} — {blend_view} Performance Table")
+    st.caption("Rows represent periods in chronological sequence; columns represent Supplier Group shares.")
+
+    if not filtered_period_df.empty:
+        # Cross-tab calculation
+        ct = pd.crosstab(filtered_period_df[period_col], filtered_period_df['Cleaned Supplier Group'])
+        ct = ct.reindex(index=selected_periods, columns=groups_order, fill_value=0)
+
         row_totals = ct.sum(axis=1)
 
-        # Build clean flipped table
         flipped_df = pd.DataFrame(index=ct.index)
         for g in groups_order:
             flipped_df[f"{g} %"] = (ct[g] / row_totals * 100).round(1).astype(str) + "%"
@@ -228,7 +302,7 @@ if uploaded_file is not None:
 
         flipped_df['Total Completes (N)'] = row_totals
 
-        # Add Overall / Total Row
+        # Add Overall Total Row
         grand_total_row = {}
         grand_sum = ct.sum()
         grand_n_all = grand_sum.sum()
@@ -238,20 +312,20 @@ if uploaded_file is not None:
             grand_total_row[f"{g} (N)"] = g_tot
         grand_total_row['Total Completes (N)'] = grand_n_all
 
-        flipped_df.loc['Grand Total'] = pd.Series(grand_total_row)
+        flipped_df.loc['Total (Selected)'] = pd.Series(grand_total_row)
 
         st.dataframe(flipped_df, use_container_width=True)
 
         # ----------------------------------------------------
-        # 7. Alignment vs Target Quota (Internal Change)
+        # 8. Alignment vs Target Quota (Internal Change)
         # ----------------------------------------------------
         if selected_country != 'All Markets' and not target_df.empty:
-            st.markdown("### 🎯 Alignment vs Master Targets")
+            st.markdown("### 🎯 Alignment vs Master Blend Targets")
             country_targets = target_df[target_df['Country'].str.lower() == selected_country.lower()]
 
             if not country_targets.empty:
-                group_counts = active_df['Cleaned Supplier Group'].value_counts()
-                total_c = len(active_df)
+                group_counts = filtered_period_df['Cleaned Supplier Group'].value_counts()
+                total_c = len(filtered_period_df)
 
                 align_cols = st.columns(len(country_targets))
                 align_rows = []
@@ -268,9 +342,9 @@ if uploaded_file is not None:
                     align_rows.append({
                         "Supplier Group": grp,
                         "Target Allocation": f"{target_pct:.1f}%",
-                        "Cumulative Actual": f"{actual_pct:.2f}%",
-                        "Delta (Variance)": f"{delta:+.2f}%",
-                        "Achieved Completes": f"{actual_n:,}",
+                        "Actual Achieved": f"{actual_pct:.2f}%",
+                        "Variance (Delta)": f"{delta:+.2f}%",
+                        "Completes (N)": f"{actual_n:,}",
                         "Status": status
                     })
 
@@ -284,24 +358,17 @@ if uploaded_file is not None:
                 st.dataframe(pd.DataFrame(align_rows), use_container_width=True, hide_index=True)
 
         # ----------------------------------------------------
-        # 8. Visual Trend Chart
-        # ----------------------------------------------------
-        with st.expander("📈 View Blend Trend Chart", expanded=True):
-            chart_data = ct.copy()
-            st.bar_chart(chart_data)
-
-        # ----------------------------------------------------
         # 9. Supplier Drilldown Expander
         # ----------------------------------------------------
-        with st.expander("🔎 Granular Supplier Name Breakdown"):
-            supp_ct = pd.crosstab(active_df['Supplier Name'], active_df[period_col])
-            supp_ct = supp_ct.reindex(columns=periods_order, fill_value=0)
+        with st.expander("🔎 Granular Supplier Breakdown (Selected Periods)"):
+            supp_ct = pd.crosstab(filtered_period_df['Supplier Name'], filtered_period_df[period_col])
+            supp_ct = supp_ct.reindex(columns=selected_periods, fill_value=0)
             supp_ct['Total Completes'] = supp_ct.sum(axis=1)
             supp_ct = supp_ct.sort_values(by='Total Completes', ascending=False)
             st.dataframe(supp_ct, use_container_width=True)
 
     else:
-        st.warning("No records found for the selected market.")
+        st.warning("No records found for the selected filter.")
 
 else:
     st.info("👈 Upload your tracker CSV export in the sidebar to populate the dashboard.")
