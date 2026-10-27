@@ -74,7 +74,7 @@ uploaded_file = st.sidebar.file_uploader("Upload Tracker Raw CSV", type=["csv"])
 if uploaded_file is not None:
     df = pd.read_csv(uploaded_file, low_memory=False)
 
-    # Strictly filter for Completes only
+    # Filter for Completes only
     status_col = 'Respondent Status Description'
     if status_col in df.columns:
         df = df[df[status_col].astype(str).str.strip().str.lower() == 'complete'].copy()
@@ -86,7 +86,7 @@ if uploaded_file is not None:
         st.warning("No records found with status 'Complete'.")
         st.stop()
 
-    # Parse timestamps with dayfirst=True
+    # Parse timestamps
     date_cols = [c for c in ['PS Entry DateTime', 'PS Entry DateTime (Pacific Time Zone)'] if c in df.columns]
     if not date_cols:
         st.error("Missing date column: Could not find 'PS Entry DateTime'.")
@@ -102,7 +102,7 @@ if uploaded_file is not None:
         st.warning("No complete records found from June 2026 onwards.")
         st.stop()
 
-    # Generate Month & ISO Week Labels
+    # Month and Week formatting
     df['Month'] = df[date_col].dt.strftime('%B %Y')
     
     def assign_dynamic_week(dt):
@@ -156,10 +156,10 @@ if uploaded_file is not None:
     df['Cleaned Supplier Group'] = df.apply(clean_group, axis=1)
 
     # ----------------------------------------------------
-    # 4. Sidebar View & Period Controls
+    # 4. Sidebar View Controls
     # ----------------------------------------------------
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### ⚙️ 2. View & Period Controls")
+    st.sidebar.markdown("### ⚙️ 2. View Controls")
 
     blend_view = st.sidebar.radio(
         "📅 Blend Frequency:",
@@ -171,6 +171,7 @@ if uploaded_file is not None:
 
     sorted_df = df.dropna(subset=[date_col]).sort_values(by=date_col)
     available_periods = [p for p in sorted_df[period_col].unique() if p != "Unknown"]
+    available_months = [m for m in sorted_df['Month'].unique() if m != "Unknown"]
 
     # Market Selection
     countries_list = ['All Markets'] + sorted([c for c in df['Survey Country'].dropna().unique() if str(c).strip() != ''])
@@ -178,7 +179,7 @@ if uploaded_file is not None:
 
     active_df = df if selected_country == 'All Markets' else df[df['Survey Country'] == selected_country].copy()
 
-    # Dynamic Filter / Comparison Mode
+    # Dynamic Filter Mode
     filter_mode = st.sidebar.radio(
         f"🔍 {period_label} Display Mode:",
         options=[f"⚡ Compare with Previous {period_label}", "🎯 Custom Selection", "📜 View All Periods"],
@@ -236,7 +237,7 @@ if uploaded_file is not None:
     st.markdown("---")
 
     # ----------------------------------------------------
-    # 6. Period Comparison Summary (When 2 Periods Selected)
+    # 6. Direct Comparison Card (When 2 Periods Selected)
     # ----------------------------------------------------
     all_groups = ['Group 1', 'Group 2', 'Group MP']
     actual_groups_found = [g for g in all_groups if g in active_df['Cleaned Supplier Group'].unique()]
@@ -279,10 +280,10 @@ if uploaded_file is not None:
         st.markdown("---")
 
     # ----------------------------------------------------
-    # 7. Flipped Table View (Periods = Rows, Groups = Columns)
+    # 7. Composite Group Blend Table
     # ----------------------------------------------------
-    st.subheader(f"📋 {selected_country} — {blend_view} Performance Table")
-    st.caption("Rows represent periods in chronological sequence; columns represent Supplier Group shares.")
+    st.subheader(f"📊 {selected_country} — {blend_view} Group Performance")
+    st.caption("Rows represent chronological periods; columns represent Supplier Groups.")
 
     if not filtered_period_df.empty:
         ct = pd.crosstab(filtered_period_df[period_col], filtered_period_df['Cleaned Supplier Group'])
@@ -314,7 +315,7 @@ if uploaded_file is not None:
         # ----------------------------------------------------
         alignment_summary = {}
         if selected_country != 'All Markets' and not target_df.empty:
-            st.markdown("### 🎯 Alignment vs Master Blend Targets")
+            st.markdown("### 🎯 Alignment vs Master Targets")
             country_targets = target_df[target_df['Country'].str.lower() == selected_country.lower()]
 
             if not country_targets.empty:
@@ -359,14 +360,45 @@ if uploaded_file is not None:
                 st.dataframe(pd.DataFrame(align_rows), use_container_width=True, hide_index=True)
 
         # ----------------------------------------------------
-        # 9. Supplier Drilldown Expander
+        # 9. NEW: Supplier vs. Month Performance View
         # ----------------------------------------------------
-        with st.expander("🔎 Granular Supplier Breakdown (Selected Periods)"):
-            supp_ct = pd.crosstab(filtered_period_df['Supplier Name'], filtered_period_df[period_col])
-            supp_ct = supp_ct.reindex(columns=selected_periods, fill_value=0)
-            supp_ct['Total Completes'] = supp_ct.sum(axis=1)
-            supp_ct = supp_ct.sort_values(by='Total Completes', ascending=False)
-            st.dataframe(supp_ct, use_container_width=True)
+        st.markdown("---")
+        st.subheader(f"🏢 Supplier vs. Month Breakdown: {selected_country}")
+        st.caption("Tracking each supplier's volume and monthly share from June through October.")
+
+        supp_format = st.radio("Supplier Table Metric:", ["Completes (N)", "Share within Month (%)", "Both (N & %)"], horizontal=True)
+
+        supp_month_ct = pd.crosstab(active_df['Supplier Name'], active_df['Month'])
+        supp_month_ct = supp_month_ct.reindex(columns=available_months, fill_value=0)
+
+        # Totals by month
+        month_totals = supp_month_ct.sum(axis=0)
+        total_market_completes = supp_month_ct.sum().sum()
+
+        supp_display_table = pd.DataFrame(index=supp_month_ct.index)
+
+        # Add assigned group for easy reference
+        supp_display_table['Assigned Group'] = [
+            clean_group({'Survey Country': selected_country, 'Supplier Name': s}) for s in supp_display_table.index
+        ]
+
+        for m in available_months:
+            m_tot = month_totals[m]
+            if supp_format == "Completes (N)":
+                supp_display_table[m] = supp_month_ct[m]
+            elif supp_format == "Share within Month (%)":
+                supp_display_table[m] = (supp_month_ct[m] / m_tot * 100).round(1).astype(str) + "%" if m_tot > 0 else "0.0%"
+            else:
+                pct_str = (supp_month_ct[m] / m_tot * 100).round(1).astype(str) + "%" if m_tot > 0 else "0.0%"
+                supp_display_table[f"{m} (N)"] = supp_month_ct[m]
+                supp_display_table[f"{m} (%)"] = pct_str
+
+        supp_display_table['Total Completes'] = supp_month_ct.sum(axis=1)
+        supp_display_table['Overall Share %'] = (supp_display_table['Total Completes'] / total_market_completes * 100).round(1).astype(str) + "%" if total_market_completes > 0 else "0.0%"
+
+        # Sort by total volume
+        supp_display_table = supp_display_table.sort_values(by='Total Completes', ascending=False)
+        st.dataframe(supp_display_table, use_container_width=True)
 
         # ----------------------------------------------------
         # 10. Automated Country Summary Notes Box
@@ -390,10 +422,10 @@ if uploaded_file is not None:
                 )
                 top_supp_str = ", ".join([f"**{k}** ({v:,} completes)" for k, v in top_suppliers.items()])
 
-                # Bullet 1: Top Contributors
+                # Leading contributors
                 st.markdown(f"**1. Leading Panel Contributors in {selected_country}:**\n* Top sources: {top_supp_str}")
 
-                # Bullet 2: Target Quota Alignment Notes
+                # Quota Health
                 if alignment_summary:
                     notes_list = []
                     actions = []
@@ -410,15 +442,19 @@ if uploaded_file is not None:
                     for n in notes_list:
                         st.markdown(f"* {n}")
 
-                    # Bullet 3: WoW / MoM Shift Dynamics
+                    # Shift Dynamics
                     if comp_deltas:
                         st.markdown(f"**3. {period_label}-on-{period_label} Movement Dynamic:**")
                         for grp, d in comp_deltas.items():
                             direction = "increased" if d > 0 else ("decreased" if d < 0 else "remained flat")
                             st.markdown(f"* **{grp}** {direction} by **{abs(d):.1f}%** compared to {selected_periods[0]}.")
 
-                    # Bullet 4: Action Items
-                    st.markdown("**4. Recommended Operational Actions:**")
+                    # In-field October note
+                    st.markdown("**4. In-Flight Fieldwork Strategy (October Catch-up):**")
+                    st.markdown("* 💡 *October is currently active:* You can steer the remaining sample volume to under-indexing groups. This will pull down over-quota supplier percentages before the month concludes.")
+
+                    # Recommended Actions
+                    st.markdown("**5. Recommended Operational Actions:**")
                     if actions:
                         for act in actions:
                             st.markdown(f"* ⚠️ {act}")
